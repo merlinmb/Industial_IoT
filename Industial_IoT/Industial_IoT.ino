@@ -8,7 +8,7 @@
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 #include <ESP8266HTTPUpdateServer.h>
-#include <WiFiManager.h>          //https://github.com/tzapu/WiFiManager
+#include <WiFiManager.h>			// https://github.com/tzapu/WiFiManager
 #include <SFE_BMP180.h>
 #include <Wire.h>
 #include <SimpleTimer\SimpleTimer.h>
@@ -86,7 +86,7 @@ void configModeCallback(WiFiManager *myWiFiManager) {
 
 //callback notifying us of the need to save config
 void saveConfigCallback() {
-	Serial.println("Should save config");
+	DEBUG_PRINTLN("Should save config");
 	_shouldSaveConfigWM = true;
 }
 
@@ -94,17 +94,18 @@ void loadCustomParams() {
 	
 
 	//read configuration from FS json
-	Serial.println("Mounting FS...");
+	DEBUG_PRINTLN("Mounting FS...");
 
 	if (SPIFFS.begin()) {
-		Serial.println("mounted file system");
+		DEBUG_PRINTLN("mounted file system");
 		if (SPIFFS.exists("/config.json")) {
 			//file exists, reading and loading
-			Serial.println("reading config file");
+			DEBUG_PRINTLN("reading config file");
 			File configFile = SPIFFS.open("/config.json", "r");
 			if (configFile) {
-				Serial.println("opened config file");
+				DEBUG_PRINT("opened config file: ");
 				size_t size = configFile.size();
+				DEBUG_PRINT(String(size)); DEBUG_PRINTLN(" bytes");
 				// Allocate a buffer to store contents of the file.
 				std::unique_ptr<char[]> buf(new char[size]);
 
@@ -113,7 +114,7 @@ void loadCustomParams() {
 				JsonObject& json = jsonBuffer.parseObject(buf.get());
 				json.printTo(Serial);
 				if (json.success()) {
-					Serial.println("\nparsed json");
+					DEBUG_PRINTLN("\nparsed json");
 
 					strcpy(_smsWMParam, json["mobile"]);
 					strcpy(_thWMParam, json["temphigh"]);
@@ -124,13 +125,13 @@ void loadCustomParams() {
 					strcpy(_timerWMParam, json["timer"]);
 				}
 				else {
-					Serial.println("failed to load json config");
+					DEBUG_PRINTLN("failed to load json config");
 				}
 			}
 		}
 	}
 	else {
-		Serial.println("failed to mount FS");
+		DEBUG_PRINTLN("failed to mount FS");
 	}
 	//end read
 }
@@ -148,19 +149,19 @@ void setupWifi() {
 
 	loadCustomParams();
 	//Custom parameters:  (id/name, placeholder/prompt, default, length)
-	WiFiManagerParameter __smsWMParam("mobile",			"Alert mobile number		:", "+27", 12);
+	WiFiManagerParameter __smsWMParam("mobile",			"Alert mobile number", "+27", 12);
 	wifiManager.addParameter(&__smsWMParam);
-	WiFiManagerParameter __thWMParam("temphigh",		"Temperature trigger (high)	:", _thWMParam, 8);
+	WiFiManagerParameter __thWMParam("temphigh",		"Temperature trigger (high)", _thWMParam, 8);
 	wifiManager.addParameter(&__thWMParam);
-	WiFiManagerParameter __tlWMParam("templow",			"Temperature trigger (low)	:", _tlWMParam, 8);
+	WiFiManagerParameter __tlWMParam("templow",			"Temperature trigger (low)", _tlWMParam, 8);
 	wifiManager.addParameter(&__tlWMParam);
-	WiFiManagerParameter __hhWMParam("humidityhigh",	"Humidity trigger (high)	:", _hhWMParam, 8);
+	WiFiManagerParameter __hhWMParam("humidityhigh",	"Humidity trigger (high)", _hhWMParam, 8);
 	wifiManager.addParameter(&__hhWMParam);
-	WiFiManagerParameter __hlWMParam("humiditylow",		"Humidity trigger (low)		:", _hlWMParam, 8);
+	WiFiManagerParameter __hlWMParam("humiditylow",		"Humidity trigger (low)", _hlWMParam, 8);
 	wifiManager.addParameter(&__hlWMParam);
-	WiFiManagerParameter __retOffWMParam("return",		"Off when value returns to % of trigger:", _retOffWMParam, 8);
+	WiFiManagerParameter __retOffWMParam("return",		"Off when value returns to % of trigger", _retOffWMParam, 8);
 	wifiManager.addParameter(&__retOffWMParam);
-	WiFiManagerParameter __timerWMParam("timer",		"Run every X minutes		:", _timerWMParam, 8);
+	WiFiManagerParameter __timerWMParam("timer",		"Run every X minutes", _timerWMParam, 8);
 	wifiManager.addParameter(&__timerWMParam);
 
 	//sets timeout until configuration portal gets turned off
@@ -209,9 +210,8 @@ void setupWifi() {
 	_retOffWMParamInt = atoi(_retOffWMParam);
 	_timerWMParamInt = atoi(_timerWMParam);
 
-	//save the custom parameters to FS
 	if (_shouldSaveConfigWM) {
-		Serial.println("saving config");
+		DEBUG_PRINTLN("saving config");
 		DynamicJsonBuffer jsonBuffer;
 		JsonObject& json = jsonBuffer.createObject();
 
@@ -226,11 +226,15 @@ void setupWifi() {
 
 		File configFile = SPIFFS.open("/config.json", "w");
 		if (!configFile) {
-			Serial.println("failed to open config file for writing");
+			DEBUG_PRINTLN("failed to open config file for writing");
+		}
+		else {
+			json.printTo(Serial);
+			json.printTo(configFile);
+			configFile.close();
+			//end save
 		}
 	}
-	delay(1500);
-
 	WiFi.mode(WIFI_AP_STA);
 	MDNS.begin(_localWebHost);
 
@@ -250,11 +254,11 @@ void setupBMP180() {
 	Wire.begin(4, 5); //(sda, scl)
 	delay(10);
 	if (_bmp180Sensor.begin())
-		Serial.println("BMP180 init successful!");
+		DEBUG_PRINTLN("BMP180 init successful!");
 	else
 	{
 		// Oops, something went wrong, this is usually a connection problem,
-		Serial.println("BMP180 init fail, values will be zeroed (0)");
+		DEBUG_PRINTLN("BMP180 init fail, values will be zeroed (0)");
 	}
 }
 
@@ -267,12 +271,13 @@ void Interrupt() {
 
 		DEBUG_PRINTLN("Resetting WifiManager Settings");
 		wifiManager.resetSettings();
-		DEBUG_PRINTLN("Formatting Filesystem, please wait...");
+		DEBUG_PRINTLN("Formatting Filesystem, please wait... (30 seconds)");
 		SPIFFS.format();
 
-		delay(1000);
+		delay(500);
 		DEBUG_PRINTLN("Completed. Resetting IIoT.");
 		ESP.reset();
+		delay(1000);
 	}
 }
 
@@ -288,7 +293,7 @@ void setupHTTPUpdateServer() {
 	_httpUpdater.setup(&_httpServer, _updateWebPath, _updateWebUsername, _updateWebPassword);
 
 	MDNS.addService("http", "tcp", 80);
-	Serial.printf("HTTPUpdateServer ready! Open http://%s.local%s in your browser and login with username '%s' and password '%s'\n", _localWebHost, _updateWebPath, _updateWebUsername, _updateWebPassword);
+	DEBUG_PRINTLN("HTTPUpdateServer ready! Open http://" + String(_localWebHost) + String(_updateWebPath) + " in your browser and login with username " + String(_updateWebUsername) + " and password " + String(_updateWebPassword) +"\n");
 }
 
 void handle_root() {
@@ -297,12 +302,12 @@ void handle_root() {
 	//_webClientReturnString += "Humidity: " + String((int)_humidity) + "%" + " ----  Temperature: " + String((int)_temperature) + "C" + " ---- Pressure: " + String((int)_pressure) + "mb";
 	_webClientReturnString += "Temperature: " + String((int)_temperature) + "C" + " ---- Pressure: " + String((int)_pressure) + "mb\n\n";
 
-	_webClientReturnString += "Alert mobile number:			" + String(_smsWMParam) + "\n";
+	_webClientReturnString += "Alert mobile number:	" + String(_smsWMParam) + "\n";
 	_webClientReturnString += "Temperature trigger (high):	" + String(_thWMParamInt)+"\n";
 	_webClientReturnString += "Temperature trigger (low):	" + String(_tlWMParamInt) + "\n";
 	_webClientReturnString += "Humidity trigger(high):		" + String(_hhWMParamInt) + "\n";
 	_webClientReturnString += "Humidity trigger(low):		" + String(_hlWMParamInt) + "\n";
-	_webClientReturnString += "Off when value returns to (" + String(_retOffWMParamInt) + "%) of trigger\n";
+	_webClientReturnString += "Off when value returns to (" + String(_retOffWMParamInt) + "%) of trigger.\n";
 	_webClientReturnString += "Run every (" + String(_timerWMParamInt) + ") minutes.\n";
 
 	_httpServer.send(200, "text/plain", _webClientReturnString);
@@ -353,11 +358,11 @@ void updateSensorValues() {
 		if (_sensorStatus != 0)
 		{
 			// Print out the measurement:
-			Serial.print("temperature: ");
-			Serial.print(_temperature, 2);
-			Serial.print(" deg C, ");
-			Serial.print((9.0 / 5.0)*_temperature + 32.0, 2);
-			Serial.println(" deg F");
+			DEBUG_PRINT("temperature: ");
+			DEBUG_PRINTDEC(_temperature, 2);
+			DEBUG_PRINT(" deg C, ");
+			DEBUG_PRINTDEC((9.0 / 5.0)*_temperature + 32.0, 2);
+			DEBUG_PRINTLN(" deg F");
 
 			// Start a pressure measurement:
 			// The parameter is the oversampling setting, from 0 to 3 (highest res, longest wait).
@@ -380,11 +385,11 @@ void updateSensorValues() {
 				if (_sensorStatus != 0)
 				{
 					// Print out the measurement:
-					Serial.print("absolute pressure: ");
-					Serial.print(_pressure, 2);
-					Serial.print(" mb, ");
-					Serial.print(_pressure*0.0295333727, 2);
-					Serial.println(" inHg");
+					DEBUG_PRINT("absolute pressure: ");
+					DEBUG_PRINTDEC(_pressure, 2);
+					DEBUG_PRINT(" mb, ");
+					DEBUG_PRINTDEC(_pressure*0.0295333727, 2);
+					DEBUG_PRINTLN(" inHg");
 
 					// The pressure sensor returns abolute pressure, which varies with altitude.
 					// To remove the effects of altitude, use the sealevel function and your current altitude.
@@ -393,11 +398,11 @@ void updateSensorValues() {
 					// Result: p0 = sea-level compensated pressure in mb
 
 					_relativePressure = _bmp180Sensor.sealevel(_pressure, ALTITUDE); // we're at 1655 meters (Boulder, CO)
-					Serial.print("relative (sea-level) pressure: ");
-					Serial.print(_relativePressure, 2);
-					Serial.print(" mb, ");
-					Serial.print(_relativePressure*0.0295333727, 2);
-					Serial.println(" inHg");
+					DEBUG_PRINT("relative (sea-level) pressure: ");
+					DEBUG_PRINTDEC(_relativePressure, 2);
+					DEBUG_PRINT(" mb, ");
+					DEBUG_PRINTDEC(_relativePressure*0.0295333727, 2);
+					DEBUG_PRINTLN(" inHg");
 
 					// On the other hand, if you want to determine your altitude from the pressure reading,
 					// use the altitude function along with a baseline pressure (sea-level or other).
@@ -405,19 +410,19 @@ void updateSensorValues() {
 					// Result: a = altitude in m.
 
 					_altitude = _bmp180Sensor.altitude(_pressure, _relativePressure);
-					Serial.print("computed altitude: ");
-					Serial.print(_altitude, 0);
-					Serial.print(" meters, ");
-					Serial.print(_altitude*3.28084, 0);
-					Serial.println(" feet");
+					DEBUG_PRINT("computed altitude: ");
+					DEBUG_PRINTDEC(_altitude, 0);
+					DEBUG_PRINT(" meters, ");
+					DEBUG_PRINTDEC(_altitude*3.28084, 0);
+					DEBUG_PRINTLN(" feet");
 				}
-				else Serial.println("error retrieving pressure measurement\n");
+				else DEBUG_PRINTLN("error retrieving pressure measurement\n");
 			}
-			else Serial.println("error starting pressure measurement\n");
+			else DEBUG_PRINTLN("error starting pressure measurement\n");
 		}
-		else Serial.println("error retrieving temperature measurement\n");
+		else DEBUG_PRINTLN("error retrieving temperature measurement\n");
 	}
-	else Serial.println("error starting temperature measurement\n");
+	else DEBUG_PRINTLN("error starting temperature measurement\n");
 
 }
 
