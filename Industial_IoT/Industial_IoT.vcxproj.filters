@@ -17,5 +17,9 @@
   <ItemGroup>
     <None Include="Industial_IoT.ino" />
   </ItemGroup>
- 
+  <ItemGroup>
+    <ClInclude Include="__vm\.Industial_IoT.vsarduino.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
 </Project>
