@@ -1,3 +1,8 @@
+#include <FS.h>                   //this needs to be first, or it all crashes and burns...
+
+
+#include <ArduinoJson.h> //https://github.com/bblanchon/ArduinoJson
+
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
@@ -32,6 +37,28 @@ const char* _updateWebPath = "/firmware";
 const char* _updateWebUsername = "admin";
 const char* _updateWebPassword = "admin";
 
+// Alert mobile number
+char _smsWMParam[12];
+//Temperature trigger (high)
+char _thWMParam[8];
+int _thWMParamInt = 0;
+//Temperature trigger (low)
+char _tlWMParam[8];
+int _tlWMParamInt = 0;
+//Humidity trigger (high)
+char _hhWMParam[8];
+int _hhWMParamInt = 0;
+//Humidity trigger (low)
+char _hlWMParam[8];
+int _hlWMParamInt = 0;
+//Off when value returns to % of trigger
+char _retOffWMParam[8];
+int _retOffWMParamInt = 0;
+//Run every X minutes
+char _timerWMParam[8];
+int _timerWMParamInt = 1; //default trigger is ever minute
+
+
 SFE_BMP180 _bmp180Sensor;
 SimpleTimer _sensorTimer;
 
@@ -54,13 +81,58 @@ void configModeCallback(WiFiManager *myWiFiManager) {
 	DEBUG_PRINTLN(WiFi.softAPIP());
 	//if you used auto generated SSID, print it
 	DEBUG_PRINTLN(myWiFiManager->getConfigPortalSSID());
-	
+
 }
 
 //callback notifying us of the need to save config
 void saveConfigCallback() {
 	Serial.println("Should save config");
 	_shouldSaveConfigWM = true;
+}
+
+void loadCustomParams() {
+	
+
+	//read configuration from FS json
+	Serial.println("Mounting FS...");
+
+	if (SPIFFS.begin()) {
+		Serial.println("mounted file system");
+		if (SPIFFS.exists("/config.json")) {
+			//file exists, reading and loading
+			Serial.println("reading config file");
+			File configFile = SPIFFS.open("/config.json", "r");
+			if (configFile) {
+				Serial.println("opened config file");
+				size_t size = configFile.size();
+				// Allocate a buffer to store contents of the file.
+				std::unique_ptr<char[]> buf(new char[size]);
+
+				configFile.readBytes(buf.get(), size);
+				DynamicJsonBuffer jsonBuffer;
+				JsonObject& json = jsonBuffer.parseObject(buf.get());
+				json.printTo(Serial);
+				if (json.success()) {
+					Serial.println("\nparsed json");
+
+					strcpy(_smsWMParam, json["mobile"]);
+					strcpy(_thWMParam, json["temphigh"]);
+					strcpy(_tlWMParam, json["templow"]);
+					strcpy(_hhWMParam, json["humidityhigh"]);
+					strcpy(_hlWMParam, json["humiditylow"]);
+					strcpy(_retOffWMParam, json["return"]);
+					strcpy(_timerWMParam, json["timer"]);
+				}
+				else {
+					Serial.println("failed to load json config");
+				}
+			}
+		}
+	}
+	else {
+		Serial.println("failed to mount FS");
+	}
+	//end read
 }
 
 void setupWifi() {
@@ -74,26 +146,27 @@ void setupWifi() {
 	wifiManager.setMinimumSignalQuality(25);
 	wifiManager.setRemoveDuplicateAPs(true);
 
-	// id/name, placeholder/prompt, default, length
-	WiFiManagerParameter __smsWMParam("mobile", "Alert mobile number", "+27", 40);
+	loadCustomParams();
+	//Custom parameters:  (id/name, placeholder/prompt, default, length)
+	WiFiManagerParameter __smsWMParam("mobile",			"Alert mobile number		:", "+27", 12);
 	wifiManager.addParameter(&__smsWMParam);
-	WiFiManagerParameter __thWMParam("temphigh", "Temperature trigger (high)", "25", 8);
+	WiFiManagerParameter __thWMParam("temphigh",		"Temperature trigger (high)	:", _thWMParam, 8);
 	wifiManager.addParameter(&__thWMParam);
-	WiFiManagerParameter __tlWMParam("templow", "Temperature trigger (low)", "+27", 8);
+	WiFiManagerParameter __tlWMParam("templow",			"Temperature trigger (low)	:", _tlWMParam, 8);
 	wifiManager.addParameter(&__tlWMParam);
-	WiFiManagerParameter __hhWMParam("humidityhigh", "Humidity trigger (high)", "+27", 8);
+	WiFiManagerParameter __hhWMParam("humidityhigh",	"Humidity trigger (high)	:", _hhWMParam, 8);
 	wifiManager.addParameter(&__hhWMParam);
-	WiFiManagerParameter __hlWMParam("humiditylow", "Humidity trigger (low)", "+27", 8);
+	WiFiManagerParameter __hlWMParam("humiditylow",		"Humidity trigger (low)		:", _hlWMParam, 8);
 	wifiManager.addParameter(&__hlWMParam);
-	WiFiManagerParameter __retOffWMParam("return", "Off when value returns to % of trigger", "5", 8);
+	WiFiManagerParameter __retOffWMParam("return",		"Off when value returns to % of trigger:", _retOffWMParam, 8);
 	wifiManager.addParameter(&__retOffWMParam);
-	WiFiManagerParameter __timerWMParam("timer", "Run every X minutes", "1", 8);
+	WiFiManagerParameter __timerWMParam("timer",		"Run every X minutes		:", _timerWMParam, 8);
 	wifiManager.addParameter(&__timerWMParam);
 
 	//sets timeout until configuration portal gets turned off
 	//useful to make it all retry or go to sleep
 	//in seconds
-	wifiManager.setTimeout(90);
+	wifiManager.setTimeout(360);
 
 	//fetches ssid and pass and tries to connect
 	//if it does not connect it starts an access point with the specified name
@@ -119,6 +192,43 @@ void setupWifi() {
 
 	//if you get here you have connected to the WiFi
 	DEBUG_PRINTLN("Connected... :)");
+
+	strcpy(_smsWMParam , __smsWMParam.getValue());
+	strcpy(_thWMParam , __thWMParam.getValue());
+	strcpy(_tlWMParam , __tlWMParam.getValue());
+	strcpy(_hhWMParam , __hhWMParam.getValue());
+	strcpy(_hlWMParam , __hlWMParam.getValue());
+	strcpy(_retOffWMParam , __retOffWMParam.getValue());
+	strcpy(_timerWMParam , __timerWMParam.getValue());
+
+
+	_thWMParamInt = atoi(_thWMParam);
+	_tlWMParamInt = atoi(_tlWMParam);
+	_hhWMParamInt = atoi(_hhWMParam);
+	_hlWMParamInt = atoi(_hlWMParam);
+	_retOffWMParamInt = atoi(_retOffWMParam);
+	_timerWMParamInt = atoi(_timerWMParam);
+
+	//save the custom parameters to FS
+	if (_shouldSaveConfigWM) {
+		Serial.println("saving config");
+		DynamicJsonBuffer jsonBuffer;
+		JsonObject& json = jsonBuffer.createObject();
+
+		json["mobile"] = _smsWMParam;
+		json["temphigh"] = _thWMParam;
+		json["templow"] = _tlWMParam;
+		json["humidityhigh"] = _hhWMParam;
+		json["humiditylow"] = _hlWMParam;
+		json["return"] = _retOffWMParam;
+		json["timer"] = _timerWMParam;
+
+
+		File configFile = SPIFFS.open("/config.json", "w");
+		if (!configFile) {
+			Serial.println("failed to open config file for writing");
+		}
+	}
 	delay(1500);
 
 	WiFi.mode(WIFI_AP_STA);
@@ -128,7 +238,7 @@ void setupWifi() {
 }
 
 void setupBMP180() {
-	
+
 	DEBUG_PRINTLN();
 	DEBUG_PRINT("Provided altitude: ");
 	DEBUG_PRINTDEC(ALTITUDE, 0);
@@ -149,13 +259,21 @@ void setupBMP180() {
 }
 
 void Interrupt() {
-	DEBUG_PRINTLN("Button Pressed");
-	WiFiManager wifiManager;
-	delay(50);
+	if (_isConnected)
+	{
 
-	wifiManager.resetSettings();
-	delay(1000);
-	ESP.reset();
+		WiFiManager wifiManager;
+		delay(50);
+
+		DEBUG_PRINTLN("Resetting WifiManager Settings");
+		wifiManager.resetSettings();
+		DEBUG_PRINTLN("Formatting Filesystem, please wait...");
+		SPIFFS.format();
+
+		delay(1000);
+		DEBUG_PRINTLN("Completed. Resetting IIoT.");
+		ESP.reset();
+	}
 }
 
 void debounceInterrupt() {
@@ -174,9 +292,18 @@ void setupHTTPUpdateServer() {
 }
 
 void handle_root() {
+	DEBUG_PRINTLN("Serving root page");
 	_webClientReturnString = "Hello from Industrial IoT, read individual values from /temperature /humidity /pressure \n\n";
 	//_webClientReturnString += "Humidity: " + String((int)_humidity) + "%" + " ----  Temperature: " + String((int)_temperature) + "C" + " ---- Pressure: " + String((int)_pressure) + "mb";
-	_webClientReturnString += "Temperature: " + String((int)_temperature) + "C" + " ---- Pressure: " + String((int)_pressure) + "mb";
+	_webClientReturnString += "Temperature: " + String((int)_temperature) + "C" + " ---- Pressure: " + String((int)_pressure) + "mb\n\n";
+
+	_webClientReturnString += "Alert mobile number:			" + String(_smsWMParam) + "\n";
+	_webClientReturnString += "Temperature trigger (high):	" + String(_thWMParamInt)+"\n";
+	_webClientReturnString += "Temperature trigger (low):	" + String(_tlWMParamInt) + "\n";
+	_webClientReturnString += "Humidity trigger(high):		" + String(_hhWMParamInt) + "\n";
+	_webClientReturnString += "Humidity trigger(low):		" + String(_hlWMParamInt) + "\n";
+	_webClientReturnString += "Off when value returns to (" + String(_retOffWMParamInt) + "%) of trigger\n";
+	_webClientReturnString += "Run every (" + String(_timerWMParamInt) + ") minutes.\n";
 
 	_httpServer.send(200, "text/plain", _webClientReturnString);
 	delay(100);
@@ -190,13 +317,11 @@ void setupWebServer() {
 	});
 
 	_httpServer.on("/humidity", []() {  // if you add this subdirectory to your webserver call, you get text below :)
-		//gettemperature();           // read sensor
 		_webClientReturnString = "Humidity: " + String((int)_humidity) + "%";
 		_httpServer.send(200, "text/plain", _webClientReturnString);               // send to someones browser when asked
 	});
 
 	_httpServer.on("/pressure", []() {  // if you add this subdirectory to your webserver call, you get text below :)
-										//gettemperature();           // read sensor
 		_webClientReturnString = "Relative Pressure: " + String((int)_relativePressure) + "mb";
 		_httpServer.send(200, "text/plain", _webClientReturnString);               // send to someones browser when asked
 	});
@@ -223,7 +348,7 @@ void updateSensorValues() {
 		// Function returns 1 if successful, 0 if failure.
 
 		//_sensorStatus = _bmp180Sensor.gethumidity;
-		
+
 		_sensorStatus = _bmp180Sensor.getTemperature(_temperature);
 		if (_sensorStatus != 0)
 		{
@@ -301,17 +426,18 @@ void setup(void) {
 	Serial.begin(115200);
 	DEBUG_PRINTLN();
 	DEBUG_PRINTLN("Booting Sketch...");
-	
+
 	pinMode(RESETBUTTONPIN, INPUT);
 	attachInterrupt(RESETBUTTONPIN, debounceInterrupt, RISING);
-	
+
 
 	setupWifi(); //blocking function
 
 	setupBMP180();
 	//run it once:
 	updateSensorValues();
-	_sensorTimer.setInterval(30000, updateSensorValues);
+	if (_timerWMParamInt < 1) { _timerWMParamInt = 1; } //minimum trigger is ever minute
+	_sensorTimer.setInterval(_timerWMParamInt*60000, updateSensorValues);
 
 	setupHTTPUpdateServer();
 	setupWebServer();
@@ -320,8 +446,8 @@ void setup(void) {
 }
 
 void loop(void) {
-	if(_isConnected)
-	{ 
+	if (_isConnected)
+	{
 		_httpServer.handleClient();
 		_sensorTimer.run();
 	}
