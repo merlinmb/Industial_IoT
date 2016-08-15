@@ -8,12 +8,16 @@
 #include <ESP8266mDNS.h>
 #include <ESP8266HTTPUpdateServer.h>
 #include <WiFiManager.h>			// https://github.com/tzapu/WiFiManager
-#include <SFE_BMP180.h>
-#include <Wire.h>
 #include <SimpleTimer.h>
 #include <Ticker.h>
-#include <Time.h>
 #include <QueueArray.h>
+#include <Sim800l.h>
+#include <DHT.h>
+
+#include <SoftwareSerial.h> //is necesary for the library!! 
+#include <TimeLib.h>
+
+#include "IIoTDefs.h"
 
 #define DEBUG 1
 
@@ -29,32 +33,14 @@
 #define DEBUG_PRINTLNDEC(x,DEC)
 #endif
 
-
-
 #define ALTITUDE 1555.0 // Altitude of SparkFun's HQ in Boulder, CO. in meters
-// this constant won't change:
+
 const int RESETBUTTONPIN = 13;    // the pin that the pushbutton is attached t
 
-const char* _localWebHost = "IIoT";
+String _localWebHost = "IIot";
 const char* _updateWebPath = "/firmware";
 const char* _updateWebUsername = "admin";
 const char* _updateWebPassword = "admin";
-
-struct configValues {
-	char SMS[12] = "+27";		// Alert mobile number
-	int TemperatureHigh = 25;		// Temperature trigger (high)
-	int TemperatureLow = 5;		// Temperature trigger (low)
-	int HumidityHigh = 80;		// Humidity trigger (high)
-	int HumidityLow = 10;		// Humidity trigger (low)
-	int ReturnToOffPercentage = 5;	// Off when value returns to % of trigger
-	int CheckBoundsTimerMinutes = 1;	// default trigger is ever minute
-};
-
-
-struct sensorValueStruct {
-	time_t Time;  //umber of seconds since the epoch, usage: DateTime dt = RTC.now(); time = dt.unixtime();
-	double Temperature, Pressure, Humidity, RelativePressure, Altitude, CO;
-};
 
 configValues _currentConfigValues;
 sensorValueStruct _currentSensorValues;
@@ -62,7 +48,6 @@ const int SENSORVALUESWIDTH = 50;
 int _previousSensorValuesCount = 0;
 sensorValueStruct _previousSensorValues[SENSORVALUESWIDTH];
 
-SFE_BMP180 _bmp180Sensor;
 SimpleTimer _sensorTimer;
 Ticker _tickerOnBoardLED;
 
@@ -78,17 +63,45 @@ ESP8266HTTPUpdateServer _httpUpdater;
 long _debouncingTime = 100; //Debouncing Time in Milliseconds
 volatile unsigned long _lastMicros;
 
+#define DHTPIN 10			// SD3 (GOI10) what digital pin we're connected to
+#define DHTTYPE DHT11		// DHT 11
+//#define DHTTYPE DHT22   // DHT 22  (AM2302), AM2321
+//#define DHTTYPE DHT21   // DHT 21 (AM2301)
+DHT _dht(DHTPIN, DHTTYPE);
+
+Sim800l Sim800l;  
+
+time_t syncSoftwareRTC()
+{
+	int day, month, year, hour, minute, second;
+	Sim800l.RTCtime(&day, &month, &year, &hour, &minute, &second);
+
+	tmElements_t __tm;
+
+	if (year > 99)
+		year = year - 1970;
+	else
+		year += 30;
+	__tm.Year = year;
+	__tm.Month = month;
+	__tm.Day = day;
+	__tm.Hour = hour;
+	__tm.Minute = minute;
+	__tm.Second = second;
+	return makeTime(__tm);
+}
+
 void drawGraph() {
 	String out = "";
 	char temp[100];
-	out += "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" width=\"400\" height=\"150\">\n";
-	out += "<rect width=\"" + String(SENSORVALUESWIDTH*10) + """\ height=\"500\" fill=\"rgb(240, 240, 240)\" stroke-width=\"1\" stroke=\"rgb(0, 0, 0)\" />\n";
-	out += "<g stroke=\"black\">\n";
+	out += "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" width=\"" + String((_previousSensorValuesCount+1) * 10) + "\" height=\"500\">\n";
+	out += "<rect width=\"" + String((_previousSensorValuesCount+1) *10) + "\" height=\"500\" fill=\"rgb(250, 250, 250)\" stroke-width=\"1\" stroke=\"rgb(0, 0, 0)\" />\n";
+	out += "<g stroke=\"#0074d9\">\n";
 	if (_previousSensorValuesCount>=2){
 		for (int x = 0; x < _previousSensorValuesCount-1; x++) {
-			int y = (int)(_previousSensorValues[x].Temperature*5);
-			int y2 = (int)(_previousSensorValues[x+1].Temperature*5);
-			sprintf(temp, "<line x1=\"%d\" y1=\"%d\" x2=\"%d\" y2=\"%d\" stroke-width=\"1\" />\n", (x)*10, 100 - y, (x+1) * 10, 100 - y2);
+			int y = (int)(_previousSensorValues[x].Temperature*10);
+			int y2 = (int)(_previousSensorValues[x+1].Temperature*10);
+			sprintf(temp, "<line x1=\"%d\" y1=\"%d\" x2=\"%d\" y2=\"%d\" stroke-width=\"1\" />\n", (x)*10, 500 - y, (x+1) * 10, 500 - y2);
 			out += temp;
 			y = y2;
 		}
@@ -244,8 +257,10 @@ void setupWifi() {
 	char __apNameCA[(__apName.length() + 1)];
 	__apName.toCharArray(__apNameCA, __apName.length());
 
-	String __websiteHostName = String("IIoT_" + String(ESP.getChipId()));
-	//_localWebHost = __websiteHostName.c_str();
+	_localWebHost = String("IIoT_" + String(ESP.getChipId()));
+	DEBUG_PRINT("Hostname: "); DEBUG_PRINTLN(_localWebHost);
+
+	const char * __hostDNS = _localWebHost.c_str();
 
 	DEBUG_PRINT("Wifi AP Mode. Broadcasting as:");
 	DEBUG_PRINTLN(__apName);
@@ -271,30 +286,9 @@ void setupWifi() {
 	saveConfigValuesSPIFFS();		//write the values to FS
 
 	WiFi.mode(WIFI_AP_STA);
-	MDNS.begin(_localWebHost);
+	MDNS.begin(__hostDNS);
 
 	_isConnected = true;
-}
-
-void setupBMP180() {
-
-	DEBUG_PRINTLN();
-	DEBUG_PRINT("Provided altitude: ");
-	DEBUG_PRINTDEC(ALTITUDE, 0);
-	DEBUG_PRINT(" meters, ");
-	DEBUG_PRINTDEC(ALTITUDE*3.28084, 0);
-	DEBUG_PRINTLN(" feet");
-
-	// Initialize the sensor (it is important to get calibration values stored on the device).
-	Wire.begin(4, 5); //(sda, scl)
-	delay(10);
-	if (_bmp180Sensor.begin())
-		DEBUG_PRINTLN("BMP180 init successful!");
-	else
-	{
-		// Oops, something went wrong, this is usually a connection problem,
-		DEBUG_PRINTLN("BMP180 init fail, values will be zeroed (0)");
-	}
 }
 
 void Interrupt() {
@@ -328,20 +322,20 @@ void setupHTTPUpdateServer() {
 	_httpUpdater.setup(&_httpServer, _updateWebPath, _updateWebUsername, _updateWebPassword);
 
 	MDNS.addService("http", "tcp", 80);
-	DEBUG_PRINTLN("HTTPUpdateServer ready! Open http://" + String(_localWebHost) + String(_updateWebPath) + " in your browser and login with username " + String(_updateWebUsername) + " and password " + String(_updateWebPassword) + "\n");
+	DEBUG_PRINTLN("HTTPUpdateServer ready! Open http://" + String(_localWebHost)+ ".local"+ String(_updateWebPath) + " in your browser and login with username " + String(_updateWebUsername) + " and password " + String(_updateWebPassword) + "\n");
 }
 
 void handle_root() {
 	DEBUG_PRINTLN("Serving root page");
 	_webClientReturnString = "Hello from Industrial IoT, read individual values from /temperature /humidity /pressure \n\n";
-	//_webClientReturnString += "Humidity: " + String((int)_humidity) + "%" + " ----  Temperature: " + String((int)_temperature) + "C" + " ---- Pressure: " + String((int)_pressure) + "mb";
-	_webClientReturnString += "Temperature: " + String(_currentSensorValues.Temperature) + "C" + " ---- Pressure: " + String(_currentSensorValues.Pressure) + "mb\n\n";
+	_webClientReturnString += "Temperature: " + String(_currentSensorValues.Temperature) + "C" + " ---- Humidity: " + String(_currentSensorValues.Humidity) + "%\n\n";
+	//_webClientReturnString += "Temperature: " + String(_currentSensorValues.Temperature) + "C" + " ---- Pressure: " + String(_currentSensorValues.Pressure) + "mb\n\n";
 
 	_webClientReturnString += "Alert mobile number:	" + String(_currentConfigValues.SMS) + "\n";
 	_webClientReturnString += "Temperature trigger (high):	" + String(_currentConfigValues.TemperatureHigh) + "\n";
 	_webClientReturnString += "Temperature trigger (low):	" + String(_currentConfigValues.TemperatureLow) + "\n";
-	_webClientReturnString += "Humidity trigger(high):		" + String(_currentConfigValues.HumidityHigh) + "\n";
-	_webClientReturnString += "Humidity trigger(low):		" + String(_currentConfigValues.HumidityLow) + "\n";
+	_webClientReturnString += "Humidity trigger (high):		" + String(_currentConfigValues.HumidityHigh) + "\n";
+	_webClientReturnString += "Humidity trigger (low):		" + String(_currentConfigValues.HumidityLow) + "\n";
 	_webClientReturnString += "Off when value returns to (" + String(_currentConfigValues.ReturnToOffPercentage) + "%) of trigger.\n";
 	_webClientReturnString += "Run every (" + String(_currentConfigValues.CheckBoundsTimerMinutes) + ") minutes.\n";
 	_webClientReturnString += "\n";
@@ -371,119 +365,100 @@ void setupWebServer() {
 	});
 }
 
+void printSensorValues(sensorValueStruct *SensorValues)
+{
+	DEBUG_PRINT("temperature: ");
+	DEBUG_PRINTDEC(SensorValues->Temperature, 2);
+	DEBUG_PRINT(" deg C, ");
+	DEBUG_PRINTDEC((9.0 / 5.0)*SensorValues->Temperature + 32.0, 2);
+	DEBUG_PRINTLN(" deg F");
+	DEBUG_PRINT("feels like: ");
+	DEBUG_PRINTDEC(SensorValues->HeatIndex, 2);
+	DEBUG_PRINTLN(" deg C");
+	DEBUG_PRINT("humidity: ");
+	DEBUG_PRINTDEC(SensorValues->Humidity, 2);
+	DEBUG_PRINTLN(" %");
+	DEBUG_PRINT("absolute pressure: ");
+	DEBUG_PRINTDEC(SensorValues->Pressure, 2);
+	DEBUG_PRINT(" mb, ");
+	DEBUG_PRINTDEC(SensorValues->Pressure*0.0295333727, 2);
+	DEBUG_PRINTLN(" inHg");
+	DEBUG_PRINT("relative (sea-level) pressure: ");
+	DEBUG_PRINTDEC(SensorValues->RelativePressure, 2);
+	DEBUG_PRINT(" mb, ");
+	DEBUG_PRINTDEC(SensorValues->RelativePressure*0.0295333727, 2);
+	DEBUG_PRINTLN(" inHg");
+	DEBUG_PRINT("computed altitude: ");
+	DEBUG_PRINTDEC(SensorValues->Altitude, 0);
+	DEBUG_PRINT(" meters, ");
+	DEBUG_PRINTDEC(SensorValues->Altitude*3.28084, 0);
+	DEBUG_PRINTLN(" feet");
+}
+
 void updateSensorValues() {
-	// If you want to measure altitude, and not pressure, you will instead need
-	// to provide a known baseline pressure. This is shown at the end of the sketch.
 
-	// You must first get a temperature measurement to perform a pressure reading.
+	sensorValueStruct __newSensorValues;
 
-	// Start a temperature measurement:
-	// If request is successful, the number of ms to wait is returned.
-	// If request is unsuccessful, 0 is returned.
-	char __sensorStatus;
+	// Reading temperature or humidity takes about 250 milliseconds!
+	// Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
+	__newSensorValues.Humidity = _dht.readHumidity();
+	__newSensorValues.Temperature = _dht.readTemperature(); // Read temperature as Celsius (the default)
+	//__newSensorValues.Temperature = _dht.readTemperature(true); // Read temperature as Fahrenheit (isFahrenheit = true)
+	// Compute heat index in Celsius (isFahreheit = false)
+	__newSensorValues.HeatIndex =  _dht.computeHeatIndex(__newSensorValues.Temperature, __newSensorValues.Humidity, false);
 
-	__sensorStatus = _bmp180Sensor.startTemperature();
-	if (__sensorStatus != 0)
-	{
-		// Wait for the measurement to complete:
-		delay(__sensorStatus);
-
-		// Retrieve the completed temperature measurement:
-		// Note that the measurement is stored in the variable T.
-		// Function returns 1 if successful, 0 if failure.
-
-		//_sensorStatus = _bmp180Sensor.gethumidity;
-
-		sensorValueStruct __newSensorValues;
-
-		__sensorStatus = _bmp180Sensor.getTemperature(__newSensorValues.Temperature);
-		if (__sensorStatus != 0)
-		{
-			// Print out the measurement:
-			DEBUG_PRINT("temperature: ");
-			DEBUG_PRINTDEC(__newSensorValues.Temperature, 2);
-			DEBUG_PRINT(" deg C, ");
-			DEBUG_PRINTDEC((9.0 / 5.0)*__newSensorValues.Temperature + 32.0, 2);
-			DEBUG_PRINTLN(" deg F");
-
-			// Start a pressure measurement:
-			// The parameter is the oversampling setting, from 0 to 3 (highest res, longest wait).
-			// If request is successful, the number of ms to wait is returned.
-			// If request is unsuccessful, 0 is returned.
-
-			__sensorStatus = _bmp180Sensor.startPressure(3);
-			if (__sensorStatus != 0)
-			{
-				// Wait for the measurement to complete:
-				delay(__sensorStatus);
-
-				// Retrieve the completed pressure measurement:
-				// Note that the measurement is stored in the variable P.
-				// Note also that the function requires the previous temperature measurement (T).
-				// (If temperature is stable, you can do one temperature measurement for a number of pressure measurements.)
-				// Function returns 1 if successful, 0 if failure.
-
-				__sensorStatus = _bmp180Sensor.getPressure(__newSensorValues.Pressure, __newSensorValues.Temperature);
-				if (__sensorStatus != 0)
-				{
-					// Print out the measurement:
-					DEBUG_PRINT("absolute pressure: ");
-					DEBUG_PRINTDEC(__newSensorValues.Pressure, 2);
-					DEBUG_PRINT(" mb, ");
-					DEBUG_PRINTDEC(__newSensorValues.Pressure*0.0295333727, 2);
-					DEBUG_PRINTLN(" inHg");
-
-					// The pressure sensor returns abolute pressure, which varies with altitude.
-					// To remove the effects of altitude, use the sealevel function and your current altitude.
-					// This number is commonly used in weather reports.
-					// Parameters: P = absolute pressure in mb, ALTITUDE = current altitude in m.
-					// Result: p0 = sea-level compensated pressure in mb
-
-					__newSensorValues.RelativePressure = _bmp180Sensor.sealevel(__newSensorValues.Pressure, ALTITUDE); // we're at 1655 meters (Boulder, CO)
-					DEBUG_PRINT("relative (sea-level) pressure: ");
-					DEBUG_PRINTDEC(__newSensorValues.RelativePressure, 2);
-					DEBUG_PRINT(" mb, ");
-					DEBUG_PRINTDEC(__newSensorValues.RelativePressure*0.0295333727, 2);
-					DEBUG_PRINTLN(" inHg");
-
-					// On the other hand, if you want to determine your altitude from the pressure reading,
-					// use the altitude function along with a baseline pressure (sea-level or other).
-					// Parameters: P = absolute pressure in mb, p0 = baseline pressure in mb.
-					// Result: a = altitude in m.
-
-					__newSensorValues.Altitude = _bmp180Sensor.altitude(__newSensorValues.Pressure, __newSensorValues.RelativePressure);
-					DEBUG_PRINT("computed altitude: ");
-					DEBUG_PRINTDEC(__newSensorValues.Altitude, 0);
-					DEBUG_PRINT(" meters, ");
-					DEBUG_PRINTDEC(__newSensorValues.Altitude*3.28084, 0);
-					DEBUG_PRINTLN(" feet");
-						
-					_previousSensorValuesCount++;
-					DEBUG_PRINT(_previousSensorValuesCount); DEBUG_PRINTLN(" Historical sensor values logged");
-					if (_previousSensorValuesCount >= SENSORVALUESWIDTH) {
-						//shift everything to the left
-						for (int k = 0; k< SENSORVALUESWIDTH - 2; k++) {
-							_previousSensorValues[k] = _previousSensorValues[k + 1];
-						}
-						_previousSensorValuesCount = SENSORVALUESWIDTH - 1;
-					}
-					_previousSensorValues[_previousSensorValuesCount] = _currentSensorValues;
-
-					_currentSensorValues = __newSensorValues;
-
-				}
-				else DEBUG_PRINTLN("error retrieving pressure measurement\n");
-			}
-			else DEBUG_PRINTLN("error starting pressure measurement\n");
-		}
-		else DEBUG_PRINTLN("error retrieving temperature measurement\n");
+	// Check if any reads failed and exit early (to try again).
+	if (isnan(__newSensorValues.Humidity) || isnan(__newSensorValues.Temperature)) {
+		DEBUG_PRINTLN("Failed to read from DHT sensor!");
+		return;
 	}
-	else DEBUG_PRINTLN("error starting temperature measurement\n");
+	
+	if (_previousSensorValuesCount >= SENSORVALUESWIDTH) {
+		DEBUG_PRINTLN("Shift everything to the left");
+		for (int k = 0; k< SENSORVALUESWIDTH - 2; k++) {
+			_previousSensorValues[k] = _previousSensorValues[k + 1];
+		}
+		_previousSensorValuesCount = SENSORVALUESWIDTH - 1;
+	}
+	DEBUG_PRINT("Updating historical sensor value: "); DEBUG_PRINTLN(_previousSensorValuesCount);
+	_previousSensorValues[_previousSensorValuesCount] = ((_previousSensorValuesCount == 0)?__newSensorValues: _currentSensorValues);
+	DEBUG_PRINTLN(""); DEBUG_PRINT(_previousSensorValuesCount+1); DEBUG_PRINTLN(" historical sensor values now logged");
+
+
+	if (_previousSensorValuesCount > 0) {
+		DEBUG_PRINT("Previous sensor value: "); DEBUG_PRINTLN(_previousSensorValuesCount);
+		printSensorValues(&_previousSensorValues[_previousSensorValuesCount]);
+	}
+
+	_currentSensorValues = __newSensorValues;
+	_previousSensorValuesCount++;
+
+	DEBUG_PRINTLN("\nCurrent sensor values:");
+	printSensorValues(&_currentSensorValues);
+
 	
 }
 
 void checkSensorValues() {
 	updateSensorValues();  //first call a value
+}
+
+void setupSim800l()
+{
+	Sim800l.begin(); // initializate the library. 
+
+	String text = Sim800l.readSms(1); // first position in the prefered memory storage. 
+	DEBUG_PRINTLN(text);
+	String sq = Sim800l.signalQuality();
+	DEBUG_PRINTLN(sq);
+	bool result = Sim800l.updateRtc(2);
+	DEBUG_PRINTLN(result);
+	DEBUG_PRINTLN(Sim800l.dateNet());
+	//Sim800l.callNumber("*130*601#");
+	//Sim800l.delAllSms();
+
+	setSyncProvider(syncSoftwareRTC);
+	setSyncInterval(60000);
 }
 
 void setup(void) {
@@ -499,14 +474,16 @@ void setup(void) {
 	pinMode(RESETBUTTONPIN, INPUT);
 	attachInterrupt(RESETBUTTONPIN, debounceInterrupt, RISING);
 
+	_dht.begin(); //start the temperature/ humidity sensor
+
 
 	setupWifi(); //blocking function
 
-	setupBMP180();
-	updateSensorValues(); //run once right away
+	setupSim800l();		//start the GSM device
 
+	updateSensorValues(); //run once right away
 	if (_currentConfigValues.CheckBoundsTimerMinutes < 1) { _currentConfigValues.CheckBoundsTimerMinutes = 1; } //minimum trigger is ever minute
-	_sensorTimer.setInterval(_currentConfigValues.CheckBoundsTimerMinutes * 60000, checkSensorValues);
+	_sensorTimer.setInterval(_currentConfigValues.CheckBoundsTimerMinutes * 60000, checkSensorValues);  //change to 60000 in production
 
 	setupHTTPUpdateServer();
 	setupWebServer();
