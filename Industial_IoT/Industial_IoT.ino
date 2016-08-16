@@ -17,6 +17,7 @@
 #include <SoftwareSerial.h> //is necesary for the library!! 
 #include <TimeLib.h>
 
+#include "IIoTPinouts.h" //must be above IIotDefs
 #include "IIoTDefs.h"
 
 #define DEBUG 1
@@ -33,48 +34,13 @@
 #define DEBUG_PRINTLNDEC(x,DEC)
 #endif
 
-#define ALTITUDE 1555.0 // Altitude of SparkFun's HQ in Boulder, CO. in meters
-
-const int RESETBUTTONPIN = 13;    // the pin that the pushbutton is attached t
-
-String _localWebHost = "IIot";
-const char* _updateWebPath = "/firmware";
-const char* _updateWebUsername = "admin";
-const char* _updateWebPassword = "admin";
-
-configValues _currentConfigValues;
-sensorValueStruct _currentSensorValues;
-const int SENSORVALUESWIDTH = 50;
-int _previousSensorValuesCount = 0;
-sensorValueStruct _previousSensorValues[SENSORVALUESWIDTH];
-
-SimpleTimer _sensorTimer;
-Ticker _tickerOnBoardLED;
-
-String _webClientReturnString = "404: Nothing to see here!";     // String to send to web clients
-bool _isConnected = false;
-bool _shouldSaveConfigWM = false;
-
-
-ESP8266WebServer _httpServer(80);
-ESP8266HTTPUpdateServer _httpUpdater;
-
-//debounce the button press
-long _debouncingTime = 100; //Debouncing Time in Milliseconds
-volatile unsigned long _lastMicros;
-
-#define DHTPIN 10			// SD3 (GOI10) what digital pin we're connected to
-#define DHTTYPE DHT11		// DHT 11
-//#define DHTTYPE DHT22   // DHT 22  (AM2302), AM2321
-//#define DHTTYPE DHT21   // DHT 21 (AM2301)
-DHT _dht(DHTPIN, DHTTYPE);
-
-Sim800l Sim800l;  
 
 time_t syncSoftwareRTC()
 {
+	DEBUG_PRINTLN("Sim800l: updating clock");
 	int day, month, year, hour, minute, second;
-	Sim800l.RTCtime(&day, &month, &year, &hour, &minute, &second);
+	//fetch the actual time from the Sim800l
+	_sim800l.RTCtime(&day, &month, &year, &hour, &minute, &second);
 
 	tmElements_t __tm;
 
@@ -291,10 +257,9 @@ void setupWifi() {
 	_isConnected = true;
 }
 
-void Interrupt() {
+void resetFSInterrupt() {
 	if (_isConnected)
-	{
-
+	{		
 		WiFiManager wifiManager;
 		delay(50);
 
@@ -312,7 +277,7 @@ void Interrupt() {
 
 void debounceInterrupt() {
 	if ((long)(micros() - _lastMicros) >= _debouncingTime * 1000) {
-		Interrupt();
+		resetFSInterrupt();
 		_lastMicros = micros();
 	}
 }
@@ -367,17 +332,28 @@ void setupWebServer() {
 
 void printSensorValues(sensorValueStruct *SensorValues)
 {
-	DEBUG_PRINT("temperature: ");
+	DEBUG_PRINT("Capture Date & Time: ");
+	time_t __captureTime = time_t(SensorValues->EpochSeconds);
+	char __captureTimeStr[28];
+	sprintf(__captureTimeStr, "%02d/%02d/%02d %02d:%02d:%02d", year(__captureTime), month(__captureTime), day(__captureTime), hour(__captureTime), minute(__captureTime), second(__captureTime));
+
+
+	DEBUG_PRINTLN(__captureTimeStr);
+	DEBUG_PRINT("Temperature: ");
 	DEBUG_PRINTDEC(SensorValues->Temperature, 2);
 	DEBUG_PRINT(" deg C, ");
 	DEBUG_PRINTDEC((9.0 / 5.0)*SensorValues->Temperature + 32.0, 2);
 	DEBUG_PRINTLN(" deg F");
-	DEBUG_PRINT("feels like: ");
+	DEBUG_PRINT("Feels like: ");
 	DEBUG_PRINTDEC(SensorValues->HeatIndex, 2);
 	DEBUG_PRINTLN(" deg C");
-	DEBUG_PRINT("humidity: ");
+	DEBUG_PRINT("Humidity: ");
 	DEBUG_PRINTDEC(SensorValues->Humidity, 2);
 	DEBUG_PRINTLN(" %");
+	DEBUG_PRINT("CO levels: ");
+	DEBUG_PRINTDEC(SensorValues->COppm, 2);
+	DEBUG_PRINTLN(" ppm");
+	/*
 	DEBUG_PRINT("absolute pressure: ");
 	DEBUG_PRINTDEC(SensorValues->Pressure, 2);
 	DEBUG_PRINT(" mb, ");
@@ -393,26 +369,83 @@ void printSensorValues(sensorValueStruct *SensorValues)
 	DEBUG_PRINT(" meters, ");
 	DEBUG_PRINTDEC(SensorValues->Altitude*3.28084, 0);
 	DEBUG_PRINTLN(" feet");
+	*/
+}
+
+unsigned int updateMQValues()
+{
+	unsigned int COVal = 0;
+	// if millis() or timer wraps around, we'll just reset it
+	if (_MQTimerAlap > millis())  _MQTimerAlap = millis();
+	if (_MQTimerBlap > millis())  _MQTimerBlap = millis();
+
+	if (_MQHeaterHigh == false && _MQHeatCycles == 2 && (millis() - _MQTimerBlap > _MQTimerRead)) {
+		//  take reading of MQ sensor..
+		digitalWrite(_MQPinGreenLED, HIGH);
+		_MQmV += Get_mVfromADC(_MQPin);
+		_MQSamples += 1;
+	}
+	else {
+		digitalWrite(_MQPinGreenLED, LOW);
+	}
+	
+	if (_MQHeaterHigh == true) {
+		//  High heat applied for 60 sec
+		digitalWrite(_MQPinNPN, HIGH);
+		//  Timer A
+		if (millis() - _MQTimerAlap > _MQTimerA) {
+			_MQTimerAlap = millis(); // reset the timer
+			_MQTimerBlap = millis(); // reset the timer
+			_MQHeaterHigh = false;
+		}
+	}
+	else {
+		//  _MQHeaterHigh = false
+		//  Low heat applied for 90 sec
+		digitalWrite(_MQPinNPN, LOW);
+		//  Timer B
+		if (millis() - _MQTimerBlap > _MQTimerB) {
+			_MQTimerAlap = millis(); // reset the timer
+			_MQTimerBlap = millis(); // reset the timer
+			_MQHeaterHigh = true;
+			_MQHeatCycles += 1;
+			DEBUG_PRINT("end of heat_cycle = ");
+			DEBUG_PRINTLN(_MQHeatCycles);
+			//  Report on MQ-7 measurement at end of 
+			//  the low phase of the 3rd heat cycle.
+			if (_MQHeatCycles == 3) {
+				_MQmV = _MQmV / float(_MQSamples);
+				DEBUG_PRINT("samples = ");
+				DEBUG_PRINTLN(_MQSamples);
+				DEBUG_PRINT("A"); DEBUG_PRINT(_MQPin); DEBUG_PRINT("  = "); DEBUG_PRINT(_MQmV); DEBUG_PRINTLN(" mV");
+				float RsVal = CalcRsFromVo(_MQmV);
+				DEBUG_PRINT("Rs = ");  DEBUG_PRINTLN(RsVal);
+				_MQmV = 0.0;
+				_MQSamples = 0;
+				COVal = GetCOPpmForRatioRsRo((RsVal / _MQRo));
+				DEBUG_PRINT("CO = "); DEBUG_PRINT(COVal); DEBUG_PRINTLN(" ppm");
+				//Blynk.virtualWrite(V2, COVal);
+				//Blynk.virtualWrite(V3, RsVal);		
+			}
+		}
+	}
+
+	if (_MQHeatCycles >= 3) {
+		_MQHeatCycles = 0;
+	}
+	return COVal;
 }
 
 void updateSensorValues() {
 
 	sensorValueStruct __newSensorValues;
+	__newSensorValues.EpochSeconds = (unsigned long)(now());
 
-	// Reading temperature or humidity takes about 250 milliseconds!
-	// Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
-	__newSensorValues.Humidity = _dht.readHumidity();
-	__newSensorValues.Temperature = _dht.readTemperature(); // Read temperature as Celsius (the default)
-	//__newSensorValues.Temperature = _dht.readTemperature(true); // Read temperature as Fahrenheit (isFahrenheit = true)
-	// Compute heat index in Celsius (isFahreheit = false)
-	__newSensorValues.HeatIndex =  _dht.computeHeatIndex(__newSensorValues.Temperature, __newSensorValues.Humidity, false);
+	readDHTSensor(&__newSensorValues);
 
-	// Check if any reads failed and exit early (to try again).
-	if (isnan(__newSensorValues.Humidity) || isnan(__newSensorValues.Temperature)) {
-		DEBUG_PRINTLN("Failed to read from DHT sensor!");
-		return;
-	}
-	
+	__newSensorValues.COppm = updateMQValues();
+
+
 	if (_previousSensorValuesCount >= SENSORVALUESWIDTH) {
 		DEBUG_PRINTLN("Shift everything to the left");
 		for (int k = 0; k< SENSORVALUESWIDTH - 2; k++) {
@@ -443,22 +476,138 @@ void checkSensorValues() {
 	updateSensorValues();  //first call a value
 }
 
+/*
+* Name: PowerUp
+* Description: Soft power up
+*/
+void powerUpSim800l()
+{
+	DEBUG_PRINT("Set RI pin to input, reading: ");
+	pinMode(SIM800_RI, INPUT);  //check if the Sim800 is awake
+	delay(10);
+	if (digitalRead(SIM800_RI) == LOW) {
+		DEBUG_PRINTLN(digitalRead(SIM800_RI));
+
+		DEBUG_PRINTLN("Sim800 is in sleep mode, powering up... Stage 1");
+		pinMode(SIM800_PWR, OUTPUT);
+		delay(100);
+		DEBUG_PRINTLN("Sim800 powering up... Stage 2");
+		digitalWrite(SIM800_PWR, LOW);
+		delay(1000);
+		DEBUG_PRINTLN("Sim800 powering up... Stage 3");
+		digitalWrite(SIM800_PWR, HIGH);
+		delay(5000);
+		DEBUG_PRINTLN("Done check green light...");
+	}
+	else
+	{ 
+		DEBUG_PRINTLN("\nSim800 is already active (on)");
+	}
+}
+
 void setupSim800l()
 {
-	Sim800l.begin(); // initializate the library. 
+	powerUpSim800l(); //if off (or in sleep mode)	
 
-	String text = Sim800l.readSms(1); // first position in the prefered memory storage. 
+	DEBUG_PRINTLN("\nSim800 initialization");
+	_sim800l.begin(); // initializate the library. 
+
+	DEBUG_PRINTLN("Read the first SMS");
+	String text = _sim800l.readSms(1); // first position in the prefered memory storage. 
 	DEBUG_PRINTLN(text);
-	String sq = Sim800l.signalQuality();
-	DEBUG_PRINTLN(sq);
-	bool result = Sim800l.updateRtc(2);
-	DEBUG_PRINTLN(result);
-	DEBUG_PRINTLN(Sim800l.dateNet());
+	DEBUG_PRINT("Signal Quality, result: ");	
+	String sq = _sim800l.signalQuality();		DEBUG_PRINTLN(sq);
+	DEBUG_PRINT("Update Timezone, result: ");
+	bool __result = _sim800l.updateRtc(2); 		DEBUG_PRINTLN(__result);
+	String __resultStr = _sim800l.dateNet();
+	DEBUG_PRINT("Fetch Time, result: ");	DEBUG_PRINTLN(__resultStr);
 	//Sim800l.callNumber("*130*601#");
 	//Sim800l.delAllSms();
 
 	setSyncProvider(syncSoftwareRTC);
-	setSyncInterval(60000);
+	setSyncInterval(SIM800LTIMEUPDATEFREQ);		//sync the time every # seconds
+}
+
+void setupMQSensor(){
+	pinMode(_MQPinGreenLED, OUTPUT);
+	delay(1);
+	pinMode(_MQPinRedLED, OUTPUT);
+	delay(1);
+	pinMode(_MQPin, INPUT);
+	delay(1);
+	pinMode(_MQPinBuzzer, OUTPUT);
+	delay(1);
+	pinMode(_MQPinNPN, OUTPUT);
+	delay(1);
+
+
+	DEBUG_PRINTLN("Calibrating MQ-7 CO sensor in clean air..");
+	DEBUG_PRINTLN("  60 sec high heat cycle..");
+	digitalWrite(_MQPinNPN, HIGH);
+	// set = 200
+	for (int i = 200; i>0; i--) {
+		blinkLED(_MQPinGreenLED);
+	}
+	digitalWrite(_MQPinNPN, LOW);
+	DEBUG_PRINTLN("  60 sec warmup complete");
+
+	DEBUG_PRINTLN("  90 sec heat cycle..");
+	// set = 300
+	for (int i = 300; i>0; i--) {
+		blinkLED(_MQPinGreenLED);
+	}
+	DEBUG_PRINTLN("  90 sec warmup complete.  Reading MQ-7..");
+
+	// If mV > 3000, then repeat warm-up..
+
+	//  take a reading..
+	// set = 300
+	for (int i = 300; i>0; i--) {
+		blinkLED(_MQPinGreenLED);
+		_MQmV += Get_mVfromADC(_MQPin);
+		_MQSamples += 1;
+	}
+	_MQmV = _MQmV / (float)_MQSamples;
+	Serial.print("  avg A");
+	DEBUG_PRINT(_MQPin);
+	DEBUG_PRINT(" for ");
+	DEBUG_PRINT(_MQSamples);
+	DEBUG_PRINT(" samples = ");
+	DEBUG_PRINT(_MQmV);
+	DEBUG_PRINTLN(" mV");
+	DEBUG_PRINT("  Rs = ");
+	DEBUG_PRINTLN(CalcRsFromVo(_MQmV));
+	//  Conv output to Ro
+	//  Ro = calibration factor for measurement in clean air.
+	//  Ro = ((vRef - mV) * RL) / (mV * Ro_clean_air_factor);
+	//  Hereafter, measure the sensor output, convert to Rs, and
+	//  then calculate Rs/Ro using: Rs = ((Vc-Vo)*RL) / Vo
+	_MQRo = CalcRsFromVo(_MQmV) / _MQRo_clean_air_factor;
+	DEBUG_PRINT("  Ro = ");
+	DEBUG_PRINTLN(_MQRo);
+	//  Values in clean air are:
+	//    Rs = 6.99
+	//    Ro = 0.70
+	DEBUG_PRINTLN("Sensor calibration in clean air complete");
+	DEBUG_PRINTLN("Setup complete.  Monitoring for CO..");
+	DEBUG_PRINTLN("  ");
+	digitalWrite(_MQPinNPN, LOW);
+	_MQmV = 0.0;
+	_MQSamples = 0;
+
+	//  Start with heater on high
+	_MQHeaterHigh = true;
+	_MQTimerAlap = millis(); // reset the timer
+
+	blinkLED(_MQPinGreenLED);
+	blinkLED(_MQPinRedLED);
+	//  Chirp the buzzer
+	digitalWrite(_MQPinBuzzer, HIGH);
+	delay(1);
+	digitalWrite(_MQPinBuzzer, LOW);
+	delay(1);
+	//digitalWrite(_MQPinGreenLED, HIGH);
+	//delay(1);
 }
 
 void setup(void) {
@@ -474,15 +623,17 @@ void setup(void) {
 	pinMode(RESETBUTTONPIN, INPUT);
 	attachInterrupt(RESETBUTTONPIN, debounceInterrupt, RISING);
 
-	_dht.begin(); //start the temperature/ humidity sensor
-
 
 	setupWifi(); //blocking function
+
+	_dht.begin(); //start the temperature/ humidity sensor
+	setupMQSensor();
+
 
 	setupSim800l();		//start the GSM device
 
 	updateSensorValues(); //run once right away
-	if (_currentConfigValues.CheckBoundsTimerMinutes < 1) { _currentConfigValues.CheckBoundsTimerMinutes = 1; } //minimum trigger is ever minute
+	if (_currentConfigValues.CheckBoundsTimerMinutes < 3) { _currentConfigValues.CheckBoundsTimerMinutes = 1; } //minimum trigger is ever 3 minutes
 	_sensorTimer.setInterval(_currentConfigValues.CheckBoundsTimerMinutes * 60000, checkSensorValues);  //change to 60000 in production
 
 	setupHTTPUpdateServer();
